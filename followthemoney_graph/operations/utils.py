@@ -14,7 +14,7 @@ def track_node_tag(G, flag, force=False):
     if force:
         nodes = list(G.get_proxies())
     else:
-        nodes = list(G.get_proxies(aleph_enrich_profile=False))
+        nodes = list(G.get_proxies(**{flag: False}))
     log.debug(f"Processing nodes: {flag}: {len(nodes)}")
     for canon_id, proxy in nodes:
         yield canon_id, proxy
