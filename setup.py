@@ -24,7 +24,7 @@ setup(
         "alephclient",
         "requests",
         "redis",
-        "networkx",
+        "networkx[all]",
     ],
     entry_points={
         "followthemoney.graph": [

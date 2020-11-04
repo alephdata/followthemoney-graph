@@ -1,6 +1,5 @@
 import logging
 import itertools as IT
-from pprint import pprint  # noqa
 import hashlib
 from collections import defaultdict
 
@@ -46,13 +45,19 @@ class NodeData(list):
         return self
 
     def merge(self, *others):
-        seen_ids = set(self.proxy_ids)
+        seen_ids = {pid: i for i, pid in enumerate(self.proxy_ids)}
         for other in others:
             for data in other:
                 eid = data["proxy"].id
                 if eid not in seen_ids:
                     self.append(data)
-                    seen_ids.add(eid)
+                    seen_ids[eid] = len(self)
+                else:
+                    # `or` together all the flags between the merged items
+                    flags = self[seen_ids[eid]]["flags"]
+                    for flag, value in flags.items():
+                        if flag in data["flags"]:
+                            flags[flag] = value or data["flags"][flag]
         return self
 
 
@@ -63,8 +68,59 @@ class EntityGraph(object):
         self.network = nx.MultiDiGraph()
         self._id_to_canonical = {}
 
+    @classmethod
+    def from_networkx(cls, network, copy=False):
+        G = cls()
+        if copy:
+            network = network.copy()
+        G.network = network
+        G.rebuild_lookup()
+        return G
+
+    def rebuild_lookup(self):
+        self._id_to_canonical = {}
+        for eid, proxy in self.get_node_proxies():
+            self._id_to_canonical[proxy.id] = eid
+        for (src, dst, key), proxy in self.get_edge_proxies():
+            self._id_to_canonical[proxy.id] = key
+        log.debug(f"Rebuilt lookup table: {len(self._id_to_canonical)} items")
+
+    @classmethod
+    def intersect(cls, *graphs):
+        keep_proxy_ids = set(p.id for cid, p in graphs[0].get_node_proxies())
+        for graph in graphs[1:]:
+            keep_proxy_ids.intersection_update(
+                p.id for cid, p in graph.get_node_proxies()
+            )
+        log.debug(f"Intersect found {len(keep_proxy_ids)} proxies to keep")
+        G = cls()
+        for proxy_id in keep_proxy_ids:
+            data = NodeData()
+            for g in graphs:
+                try:
+                    canon_id = g.get_canonical_id(proxy_id)
+                    d = g.get_node_data(canon_id)
+                    data = data.merge(d)
+                except KeyError:
+                    pass
+            log.debug(
+                f"Proxy id added to intersection: {proxy_id}: {len(data)} merge items"
+            )
+            canon_id = G.create_canonical_id(data.proxy_ids)
+            G._add_node(canon_id, data)
+        G.rebuild_lookup()
+        for g in graphs:
+            # NOTE: this does not take into consideration MERGED edges or
+            # merging together edge NodeData (so flags get reset)
+            canon_ids = [g.get_canonical_id(pid) for pid in keep_proxy_ids if pid in g]
+            for _, proxy in g.get_edge_proxies(*canon_ids):
+                G.add_edge(proxy)
+        return G
+
     @staticmethod
     def create_canonical_id(ids):
+        if len(ids) == 1:
+            return ids[0]
         hasher = hashlib.md5()
         ids = list(ids)
         ids.sort()
@@ -86,25 +142,24 @@ class EntityGraph(object):
         edge.make_id(schema, source_proxies, target_proxies)
         return edge
 
-    def add_proxy(self, proxy):
+    def add_proxy(self, proxy, data=None):
         if proxy.schema.edge:
-            return self.add_edge(proxy)
+            return self.add_edge(proxy, data=None)
         else:
-            return self.add_node(proxy)
+            return self.add_node(proxy, data=None)
 
     def add_proxies(self, proxies):
         return [self.add_proxy(p) for p in proxies]
 
-    def add_node(self, proxy):
+    def add_node(self, proxy, data=None):
         if proxy.id not in self:
             eid = proxy.id
             self._id_to_canonical[eid] = eid
-            log.debug(f"Adding node: {eid}")
-            self.network.add_node(eid, data=NodeData(proxy))
+            self._add_node(eid, data or NodeData(proxy))
             return True
         return False
 
-    def add_edge(self, proxy):
+    def add_edge(self, proxy, data=None):
         if proxy.id not in self:
             connected_nodes = IT.chain(
                 proxy.get(proxy.schema.source_prop), proxy.get(proxy.schema.target_prop)
@@ -118,16 +173,26 @@ class EntityGraph(object):
             for source_id, target_id in proxy.edgepairs():
                 s = self.get_canonical_id(source_id)
                 t = self.get_canonical_id(target_id)
-                log.debug(f"Adding edge: {s} -> {t} (key={eid})")
-                self.network.add_edge(s, t, key=eid, data=NodeData(proxy))
+                self._add_edge(s, t, key=eid, data=data or NodeData(proxy))
             return True
         return False
+
+    def _add_node(self, node_id, node_data):
+        log.debug(f"Adding node: {node_id}")
+        self.network.add_node(node_id, data=node_data)
+
+    def _add_edge(self, src, dest, key, data):
+        log.debug(f"Adding edge: {src} -> {dest} (key={key})")
+        self.network.add_edge(src, dest, key=key, data=data)
 
     def get_canonical_id(self, entity_id):
         return self._id_to_canonical[entity_id]
 
-    def get_node(self, proxy):
+    def describe_proxy(self, proxy):
         canon_id = self.get_canonical_id(proxy.id)
+        return self.describe_node(canon_id)
+
+    def describe_node(self, canon_id):
         return {
             "in_edges": self.network.in_edges(canon_id),
             "out_edges": self.network.out_edges(canon_id),
@@ -177,7 +242,7 @@ class EntityGraph(object):
         canon_id = self.create_canonical_id(eids)
 
         log.debug(f"Adding merge node: {canon_id}")
-        self.network.add_node(canon_id, data=data)
+        self._add_node(canon_id, data)
         for eid in eids:
             self._id_to_canonical[eid] = canon_id
 
@@ -200,7 +265,7 @@ class EntityGraph(object):
                 log.debug(
                     f"Adding merge edge: {edge_new[0]} -> {edge_new[1]} (key={key})"
                 )
-                self.network.add_edge(*edge_new, key=key, **data)
+                self._add_edge(*edge_new, key=key, **data)
                 seen_edges.add(key)
             else:
                 log.debug(f"Skipping edge: {a} -> {b} (key={key})")
@@ -212,14 +277,45 @@ class EntityGraph(object):
         self.network.remove_node(right_canon_id)
         return canon_id
 
-    def get_proxies(self, *canon_ids, **flag_values):
+    def get_node_data(self, canon_id):
+        return self.network.nodes[canon_id]["data"]
+
+    def get_proxy_data(self, proxy):
+        canon_id = self.get_canonical_id(proxy.id)
+        return self.get_node_data(canon_id)
+
+    def get_node_proxies(self, *canon_ids, **flag_values):
+        nodes = self.get_nodes(*canon_ids, **flag_values)
+        for canon_id, proxies in nodes:
+            for proxy in proxies:
+                yield canon_id, proxy
+
+    def get_nodes(self, *canon_ids, **flag_values):
         if canon_ids:
             nodes = [(cid, self.network.nodes[cid]) for cid in canon_ids]
         else:
             nodes = self.network.nodes(data=True)
         for canon_id, data in nodes:
-            for proxy in data["data"].filter(**flag_values):
-                yield canon_id, proxy
+            data_filter = data["data"].filter(**flag_values)
+            if data_filter:
+                yield canon_id, data_filter
+
+    def get_edge_nodes(self, *canon_ids):
+        if canon_ids:
+            subgraph = self.network.subgraph(canon_ids)
+        else:
+            subgraph = self.network
+
+        for left, right, key, data in subgraph.edges(data=True, keys=True):
+            data_filter = data["data"].filter()
+            if data_filter:
+                yield (left, right, key), data_filter
+
+    def get_edge_proxies(self, *canon_ids):
+        edges = self.get_edge_nodes(*canon_ids)
+        for (left, right, key), proxies in edges:
+            for proxy in proxies:
+                yield (left, right, key), proxy
 
     def set_proxy_metadata(self, proxy, **meta):
         canon_id = self.get_canonical_id(proxy.id)
@@ -245,8 +341,8 @@ class EntityGraph(object):
     def __len__(self):
         return len(self._id_to_canonical)
 
-    def __contains__(self, proxy):
-        return proxy in self._id_to_canonical
+    def __contains__(self, proxy_id):
+        return proxy_id in self._id_to_canonical
 
     def __repr__(self):
         n_nodes = self.network.number_of_nodes()
