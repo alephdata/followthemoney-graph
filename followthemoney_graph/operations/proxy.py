@@ -3,6 +3,7 @@ import json
 from collections import defaultdict
 
 from followthemoney import model
+from tqdm.autonotebook import tqdm
 
 from ..lib import EntityGraphTracker
 
@@ -33,15 +34,15 @@ def merge_properties(G, properties=None):
     with EntityGraphTracker(G) as G:
         properties = set(properties or [])
         dedupe_table = defaultdict(set)
-        for canon_id, proxy in G.get_node_proxies():
-            for prop, values in proxy.get_type_inverted().items():
+        for canon_id, data in tqdm(G.get_nodes(), total=G.n_nodes):
+            for prop, values in data.get_type_inverted().items():
                 if properties and prop not in properties:
                     continue
                 for value in values:
                     key = f"{prop}:{value}"
                     dedupe_table[key].add(canon_id)
         id_change_lookup = {}
-        for key, canon_ids in dedupe_table.items():
+        for key, canon_ids in tqdm(dedupe_table.items()):
             canon_ids = {id_change_lookup.get(cid, cid) for cid in canon_ids}
             if len(canon_ids) > 1:
                 log.debug(f"Merging items: {key}: {len(canon_ids)}")

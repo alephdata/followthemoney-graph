@@ -1,5 +1,5 @@
 import logging
-from contextlib import contextmanager
+import time
 
 from followthemoney_graph.entity_graph import EntityGraph
 
@@ -13,39 +13,49 @@ class EntityGraphTracker(EntityGraph):
 
     def __init__(self, G):
         self.changes = {"merge": set(), "nodes_new": [], "edges_new": []}
+        self.start_time = time.time()
+        if isinstance(G, EntityGraphTracker):
+            G = G.__G
         self.__G = G
 
     def __enter__(self):
         return self
 
     def __exit__(self, *args, **kwargs):
-        pass
+        # Unwrap outselves
+        self.__class__ = self.__G.__class__
+        self.__dict__ = self.__G.__dict__
 
     def get_changes(self):
+        cur_time = time.time()
         merge = {
             canon_id: list(p for _, p in self.__G.get_node_proxies(canon_id))
             for canon_id in self.changes["merge"]
         }
-        return {**self.changes, "merge": merge}
+        return {
+            **self.changes,
+            "merge": merge,
+            "time_tracking": cur_time - self.start_time,
+        }
 
-    def merge_nodes_canonical(self, left, right):
-        log.info("Tracking merge")
-        new_canonid = self.__G.merge_nodes_canonical(left, right)
+    def merge_nodes_canonical(self, left, right, *args, **kwargs):
+        log.debug("Tracking merge")
+        new_canonid = self.__G.merge_nodes_canonical(left, right, *args, **kwargs)
         self.changes["merge"].discard(left)
         self.changes["merge"].discard(right)
         self.changes["merge"].add(new_canonid)
         return new_canonid
 
-    def add_edge(self, proxy):
-        log.info("Tracking new edge")
-        is_new = self.__G.add_edge(proxy)
+    def add_edge(self, proxy, *args, **kwargs):
+        log.debug("Tracking new edge")
+        is_new = self.__G.add_edge(proxy, *args, **kwargs)
         if is_new:
             self.changes["edges_new"].append(proxy)
         return is_new
 
-    def add_node(self, proxy):
-        log.info("Tracking new node")
-        is_new = self.__G.add_node(proxy)
+    def add_node(self, proxy, *args, **kwargs):
+        log.debug("Tracking new node")
+        is_new = self.__G.add_node(proxy, *args, **kwargs)
         if is_new:
             self.changes["nodes_new"].append(proxy)
         return is_new
