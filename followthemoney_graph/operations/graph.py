@@ -1,3 +1,5 @@
+import networkx as nx
+
 from ..entity_graph import EntityGraph
 
 
@@ -32,3 +34,18 @@ def filter_degree_min(G, min_degree, copy=False):
 
 def filter_degree_max(G, max_degree, copy=False):
     return filter_degree_range(G, (None, max_degree), copy=copy)
+
+
+def filter_component_size(G, size_range, copy=False):
+    components = nx.algorithms.components.weakly_connected_components(G.network)
+    nodes = set()
+    for component in components:
+        N = len(component)
+        if (size_range[0] is None or N >= size_range[0]) and (
+            size_range[1] is None or N < size_range[1]
+        ):
+            nodes.update(component)
+    subgraph = G.network.subgraph(nodes)
+    if copy:
+        subgraph = subgraph.copy()
+    return EntityGraph.from_networkx(subgraph)

@@ -18,34 +18,39 @@ alephclient._request = lru_cache(2048)(alephclient._request)
 def aleph_get(url, *args, **kwargs):
     fullurl = alephclient._make_url(url, *args, **kwargs)
     log.debug(f"Aleph fetch: {fullurl}")
-    try:
-        return _alephget(fullurl)
-    except AlephException:
-        log.exception("Error calling Aleph API")
-        return {}
+    return _alephget(fullurl)
 
 
-def aleph_get_qparts(url, q_parts, *args, max_query_length=3072, **kwargs):
+def aleph_get_qparts(base_url, q_parts, *args, max_query_length=3600, **kwargs):
     """
     We take a list of query parts to get OR'd together. The queries are chunked
-    so that the length is up to 3072 characters long in order to make sure we
+    so that the length is up to 3600 characters long in order to make sure we
     don't get rejected from aleph for having too long of a URL. The limit is
     technically 4096, but we'd like to leave a buffer just in ase
     """
-    join_qs = lambda qs: "({})".format(f" OR ".join(qs))
-    while q_parts:
-        size = 0
-        for i in range(len(q_parts)):
-            q_test = join_qs(q_parts[:i])
-            url_test = alephclient._make_url(url, q_test, *args, **kwargs)
-            url_len = len(url_test)
-            if url_len > max_query_length:
-                break
-        else:
-            i += 1
-        q = join_qs(q_parts[:i])
-        q_parts = q_parts[i:]
-        yield from aleph_get(url, q=q, *args, **kwargs)
+    url = _make_url_qparts(base_url, q_parts, *args, **kwargs)
+    if len(url) <= max_query_length:
+        yield from _alephget(url)
+    else:
+        while q_parts:
+            # TODO: Turn this into a binary search?
+            url = None
+            for i in range(len(q_parts)):
+                q_test = join_qs()
+                url_test = _make_url_qparts(base_url, q_parts[:i], *args, **kwargs)
+                url_len = len(url_test)
+                if url_len > max_query_length:
+                    break
+                url = url_test
+            else:
+                i += 1
+            q_parts = q_parts[i:]
+            yield from _alephget(url)
+
+
+def _make_url_qparts(url, q_parts, *args, **kwargs):
+    q = "({})".format(" OR ".join(q_parts))
+    return alephclient._make_url(url, q, *args, **kwargs)
 
 
 def clean_q_value(value):
@@ -58,8 +63,12 @@ def gen_q_part(field, value):
 
 
 def _alephget(url):
-    log.debug(f"Fetching from server: {url}")
-    return APIResultSet(alephclient, url)
+    try:
+        log.debug(f"Fetching from server: {url}")
+        return APIResultSet(alephclient, url)
+    except AlephException:
+        log.exception("Error calling Aleph API")
+        return []
 
 
 def parse_edge(edge):
@@ -131,24 +140,34 @@ def enrich_profiles(G, force=False):
         return G.get_changes()
 
 
-def on_properties(G, properties=None, schemata="Thing", filters=None):
+def on_properties(G, properties=None, schematas=("Thing",), filters=None):
     properties = set(properties or [])
-    filters = [("schemata", schemata), *(filters or [])]
+    if isinstance(schematas, str):
+        schematas = [schematas]
+    filters = filters or []
+    filters.extend(("schemata", schemata) for schemata in schematas)
     nodes = list(G.get_nodes())
     for canon_id, datas in tqdm(nodes):
         log.debug(f"Finding property matches for: {canon_id}")
-        inv_properties = {
+        search_properties = {
             k: values
             for k, values in datas.get_type_inverted().items()
             if (properties is None or k in properties) and values
         }
-        if not inv_properties:
+        search_properties.update(
+            {
+                f"properties.{k}": values
+                for k, values in datas.properties().items()
+                if (properties is not None and k in properties) and values
+            }
+        )
+        if not search_properties:
             continue
         # TODO: try doing the following instead of OR'ing everything:
         # (prop.A = i OR prop.A = j) AND (prop.B = k OR prop.B = l)
         q_parts = [
             gen_q_part(prop, value)
-            for prop, values in inv_properties.items()
+            for prop, values in search_properties.items()
             for value in values
         ]
         log.debug(f"Searching for: {len(q_parts)}: {filters}")
@@ -175,7 +194,10 @@ def enrich_properties(G, *args, **kwargs):
         return G.get_changes()
 
 
-def expand_properties(G, *args, edge_schema="UnknownLink", **kwargs):
+def expand_properties(
+    G, *args, edge_schema="UnknownLink", edge_direction="out", **kwargs
+):
+    edge_directed_out = edge_direction == "out"
     with EntityGraphTracker(G) as G:
         for canon_id, datas, connected_proxies in on_properties(G, *args, **kwargs):
             G.add_proxies(connected_proxies)
@@ -183,8 +205,11 @@ def expand_properties(G, *args, edge_schema="UnknownLink", **kwargs):
                 if not cproxy.schema.edge:
                     # HACK: the choice of proxies[0] is just convinient...
                     # ideally we could create an edge to a canonical_id.
+                    edge_endpoints = (datas[0]["proxy"],), (cproxy,)
+                    if not edge_directed_out:
+                        edge_endpoints = tuple(reversed(edge_endpoints))
                     edge = G.create_edge_entity_from_proxies(
-                        [datas[0]["proxy"]], [cproxy], schema=edge_schema
+                        *edge_endpoints, schema=edge_schema
                     )
                     G.add_proxy(edge)
         return G.get_changes()

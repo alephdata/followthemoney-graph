@@ -55,11 +55,13 @@ def is_notebook():
         return False  # Probably standard Python interpreter
 
 
-def show_entity_graph_pyvis(G):
+def show_entity_graph_pyvis(G, filename, notebook=None):
+    if notebook is None:
+        notebook = is_notebook()
     net = Network(
         height="750px",
         width="100%",
-        notebook=is_notebook(),
+        notebook=notebook,
     )
     net.barnes_hut()
 
@@ -78,7 +80,7 @@ def show_entity_graph_pyvis(G):
             title=get_edge_desc(G, (source, target, key), data),
         )
     net.show_buttons()
-    return net.show("test.html")
+    return net.show(filename)
 
 
 def export_graphml(G, filename):
