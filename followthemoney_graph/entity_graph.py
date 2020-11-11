@@ -372,6 +372,9 @@ class EntityGraph(object):
     def n_edges(self):
         return self.network.number_of_edges()
 
+    def copy(self):
+        return EntityGraph.from_networkx(self.network.copy())
+
     def __len__(self):
         return len(self._id_to_canonical)
 

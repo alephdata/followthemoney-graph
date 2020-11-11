@@ -1,5 +1,6 @@
 import logging
 from functools import lru_cache
+from copy import deepcopy
 
 from alephclient.api import AlephAPI, APIResultSet, AlephException
 from tqdm.autonotebook import tqdm
@@ -11,6 +12,7 @@ from ..lib import track_node_tag, EntityGraphTracker
 log = logging.getLogger(__name__)
 
 alephclient = AlephAPI()
+alephclient._request = lru_cache(2048)(alephclient._request)
 
 
 def aleph_get(url, *args, **kwargs):
@@ -23,35 +25,55 @@ def aleph_get(url, *args, **kwargs):
         return {}
 
 
-def aleph_get_qparts(url, q_parts, *args, **kwargs):
+def aleph_get_qparts(url, q_parts, *args, max_query_length=3072, **kwargs):
+    """
+    We take a list of query parts to get OR'd together. The queries are chunked
+    so that the length is up to 3072 characters long in order to make sure we
+    don't get rejected from aleph for having too long of a URL. The limit is
+    technically 4096, but we'd like to leave a buffer just in ase
+    """
+    join_qs = lambda qs: "({})".format(f" OR ".join(qs))
     while q_parts:
         size = 0
         for i in range(len(q_parts)):
-            s = len(q_parts[i])
-            if size + s > 512:
+            q_test = join_qs(q_parts[:i])
+            url_test = alephclient._make_url(url, q_test, *args, **kwargs)
+            url_len = len(url_test)
+            if url_len > max_query_length:
                 break
-            size += s
         else:
             i += 1
-        q = " OR ".join(q_parts[:i])
+        q = join_qs(q_parts[:i])
         q_parts = q_parts[i:]
         yield from aleph_get(url, q=q, *args, **kwargs)
 
 
-@lru_cache(2048)
+def clean_q_value(value):
+    return value.replace('"', '\\"')
+
+
+def gen_q_part(field, value):
+    value = clean_q_value(value)
+    return f'(_exists_:"{field}" AND {field}:"{value}")'
+
+
 def _alephget(url):
     log.debug(f"Fetching from server: {url}")
-    return list(APIResultSet(alephclient, url))
+    return APIResultSet(alephclient, url)
 
 
-def parse_edge(edge, in_prop, out_prop):
-    ins = [parse_entity(s) for s in edge["properties"][in_prop]]
-    outs = [parse_entity(s) for s in edge["properties"][out_prop]]
+def parse_edge(edge):
+    schema = model.get(edge["schema"])
+    in_edge_property = schema.edge_source
+    out_edge_property = schema.edge_target
+    ins = [parse_entity(s) for s in edge["properties"][in_edge_property]]
+    outs = [parse_entity(s) for s in edge["properties"][out_edge_property]]
     edge_proxy = parse_entity(edge)
     return {"in_proxies": ins, "out_proxies": outs, "edge": edge_proxy}
 
 
 def parse_entity(entity):
+    entity = deepcopy(entity)
     for key, values in entity["properties"].items():
         for i, value in enumerate(values):
             if isinstance(value, dict):
@@ -63,8 +85,9 @@ def add_aleph_entities(G, *entity_ids, publisher=True):
     with EntityGraphTracker(G) as G:
         for entity_id in entity_ids:
             entity = alephclient.get_entity(entity_id, publisher=publisher)
-            proxy = parse_entity(entity)
-            G.add_proxy(proxy)
+            if entity["id"] not in G:
+                proxy = parse_entity(entity)
+                G.add_proxy(proxy)
         return G.get_changes()
 
 
@@ -76,11 +99,12 @@ def add_aleph_collection(G, foreign_key, include=None, schema=None, publisher=Tr
         )
         edges = []
         for entity in entities:
-            proxy = parse_entity(entity)
-            if proxy.schema.edge:
-                edges.append(proxy)
-            else:
-                G.add_proxy(proxy)
+            if entity["id"] not in G:
+                proxy = parse_entity(entity)
+                if proxy.schema.edge:
+                    edges.append(proxy)
+                else:
+                    G.add_proxy(proxy)
         G.add_proxies(edges)
         return G.get_changes()
 
@@ -107,7 +131,7 @@ def enrich_profiles(G, force=False):
         return G.get_changes()
 
 
-def on_properties(G, properties=None, schemata="Thing", filters=None, force=False):
+def on_properties(G, properties=None, schemata="Thing", filters=None):
     properties = set(properties or [])
     filters = [("schemata", schemata), *(filters or [])]
     nodes = list(G.get_nodes())
@@ -120,20 +144,21 @@ def on_properties(G, properties=None, schemata="Thing", filters=None, force=Fals
         }
         if not inv_properties:
             continue
-        clean_value = lambda v: v.replace('"', '\\"')
+        # TODO: try doing the following instead of OR'ing everything:
+        # (prop.A = i OR prop.A = j) AND (prop.B = k OR prop.B = l)
         q_parts = [
-            f'{prop}:"{clean_value(value)}"'
+            gen_q_part(prop, value)
             for prop, values in inv_properties.items()
             for value in values
         ]
         log.debug(f"Searching for: {len(q_parts)}: {filters}")
-        entities = aleph_get_qparts("/entities", q_parts, limit=200, filters=filters)
+        entities = aleph_get_qparts("entities", q_parts, limit=200, filters=filters)
         connected_proxies = []
         for entity in entities:
             try:
                 entity_proxy = parse_entity(entity)
             except TypeError:
-                print(entity)
+                log.exception(f"Could not parse entity: {entity}")
                 raise
             log.debug(f"Adding entity: {entity_proxy.id}")
             connected_proxies.append(entity_proxy)
@@ -179,6 +204,11 @@ def enrich_xref(
     with EntityGraphTracker(G) as G:
         xrefs = aleph_get(f"collections/{collection_id}/xref")
         for xref in tqdm(xrefs):
+            if xref["score"] < min_score:
+                log.debug(
+                    f"Stoping xref enrichment due to low xref score: {xref['score']} < {min_score}"
+                )
+                break
             match_collection_id = int(xref["match_collection"]["collection_id"])
             if match_collection_ids and match_collection_id not in match_collection_ids:
                 log.debug(
@@ -207,35 +237,40 @@ def enrich_xref(
 
 
 def expand_interval(
-    G, schematas=("Interval",), in_edges=True, out_edges=True, filters=None, force=False
+    G, schematas=("Interval",), in_edges=True, out_edges=True, filters=None
 ):
     if not (in_edges or out_edges):
         raise ValueError("At least one of in_edges or out_edges must be True")
     nodes = list(G.get_nodes())
     if isinstance(schematas, str):
         schematas = [schematas]
+    schemas = [model.get(s) for s in schematas]
+    in_edge_properties = [s.edge_source for s in schemas]
+    out_edge_properties = [s.edge_target for s in schemas]
+    if not (in_edge_properties and out_edge_properties):
+        raise ValueError(f"Schematas have no edges: {schematas}")
+    filters = filters or []
+    filters.extend(("schemata", schemata) for schemata in schematas)
     with EntityGraphTracker(G) as G:
-        for schemata in tqdm(schematas):
-            schema = model.get(schemata)
-            in_edge_property = schema.edge_source
-            out_edge_property = schema.edge_target
-            if not (in_edge_property and out_edge_property):
-                raise ValueError(f"Schemata has no edges: {schemata}")
-
-            filters = [("schemata", schemata), *(filters or [])]
-            for canon_id, datas in tqdm(nodes, leave=False):
-                log.debug(f"Finding {schemata} edges for: {canon_id}")
-                q_parts = []
-                for data in datas:
-                    proxy = data["proxy"]
-                    if in_edges:
-                        q_parts.append(f'properties.{in_edge_property}:"{proxy.id}"')
-                    if out_edges:
-                        q_parts.append(f'properties.{out_edge_property}:"{proxy.id}"')
-                print(q_parts)
-                intervals = aleph_get_qparts("/entities", q_parts, filters=filters)
-                for interval in intervals:
-                    edge = parse_edge(interval, in_edge_property, out_edge_property)
+        for canon_id, datas in tqdm(nodes, leave=False):
+            log.debug(f"Finding {schematas} edges for: {canon_id}")
+            q_parts = []
+            for data in datas:
+                proxy = data["proxy"]
+                if in_edges:
+                    q_parts.extend(
+                        gen_q_part(f"properties.{in_edge_property}", proxy.id)
+                        for in_edge_property in in_edge_properties
+                    )
+                if out_edges:
+                    q_parts.extend(
+                        gen_q_part(f"properties.{out_edge_property}", proxy.id)
+                        for out_edge_property in out_edge_properties
+                    )
+            intervals = aleph_get_qparts("entities", q_parts, filters=filters)
+            for interval in intervals:
+                if interval["id"] not in G:
+                    edge = parse_edge(interval)
                     log.debug(f"Adding entity: {edge}")
                     G.add_proxies(edge["in_proxies"])
                     G.add_proxies(edge["out_proxies"])

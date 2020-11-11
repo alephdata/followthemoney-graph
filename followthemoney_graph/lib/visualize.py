@@ -1,5 +1,3 @@
-import itertools as IT
-from operator import itemgetter
 from tqdm.autonotebook import tqdm
 
 from pyvis.network import Network
@@ -28,7 +26,7 @@ def get_node_desc(G, node, data):
 
 def get_edge_label(G, node, data):
     data = list(data)
-    return f"{data[0]['proxy'].caption}"
+    return f"{data[0]['proxy'].schema.name}"
 
 
 def get_edge_desc(G, edge, data):
@@ -81,6 +79,30 @@ def show_entity_graph_pyvis(G):
         )
     net.show_buttons()
     return net.show("test.html")
+
+
+def export_graphml(G, filename):
+    H = nx.MultiDiGraph()
+    for node_id, data in tqdm(G.get_nodes(), total=G.n_nodes):
+        H.add_node(
+            node_id,
+            label=get_node_label(G, node_id, data),
+            schema=data[0]["proxy"].schema.name,
+            n_proxies=len(data),
+            **{p: values[0] for p, values in data.properties().items()},
+        )
+
+    for (source, target, key), data in tqdm(G.get_edge_nodes(), total=G.n_edges):
+        H.add_edge(
+            source,
+            target,
+            key=f"{source}-{target}-{key}",
+            label=get_edge_label(G, (source, target, key), data),
+            schema=data[0]["proxy"].schema.name,
+            n_proxies=len(data),
+            **{p: values[0] for p, values in data.properties().items()},
+        )
+    nx.write_graphml(H, filename)
 
 
 def show_entity_graph(G):

@@ -22,9 +22,7 @@ class EntityGraphTracker(EntityGraph):
         return self
 
     def __exit__(self, *args, **kwargs):
-        # Unwrap outselves
-        self.__class__ = self.__G.__class__
-        self.__dict__ = self.__G.__dict__
+        pass
 
     def get_changes(self):
         cur_time = time.time()
@@ -62,7 +60,7 @@ class EntityGraphTracker(EntityGraph):
 
     def __getattr__(self, name, default=_marker):
         if name in self._override:
-            return getattr(self, attr)
+            return getattr(self, name)
         else:
             # Get it from papa:
             try:
