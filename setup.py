@@ -26,13 +26,10 @@ setup(
         "redis",
         "networkx[all]",
     ],
-    entry_points={
-        "followthemoney.graph": [
-            "aleph = followthemoney_enrich.aleph:AlephGraph",
-        ],
-        # "followthemoney.cli": [
-        # "graph = followthemoney_enrich.cli:graph",
-        # ],
+    extras_require={
+        "examples": [
+            "click",
+        ]
     },
     test_suite="nose.collector",
     tests_require=["coverage", "nose"],

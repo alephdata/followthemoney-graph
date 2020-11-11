@@ -217,7 +217,7 @@ def expand_properties(
 
 def enrich_xref(
     G,
-    collection_id,
+    foreign_id,
     match_collection_ids=None,
     entity_schemata="Thing",
     match_schemata="Thing",
@@ -226,6 +226,8 @@ def enrich_xref(
 ):
     entity_schema = model.get(entity_schemata)
     match_schema = model.get(match_schemata)
+    collection = alephclient.get_collection_by_foreign_id(foreign_id)
+    collection_id = collection["id"]
     with EntityGraphTracker(G) as G:
         xrefs = aleph_get(f"collections/{collection_id}/xref")
         for xref in tqdm(xrefs):
