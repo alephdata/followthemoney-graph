@@ -49,3 +49,4 @@ def filter_component_size(G, size_range, copy=False):
     if copy:
         subgraph = subgraph.copy()
     return EntityGraph.from_networkx(subgraph)
+

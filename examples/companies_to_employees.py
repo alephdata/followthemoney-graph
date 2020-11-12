@@ -31,7 +31,8 @@ def companies_to_employees(foreign_id, min_score, component_size_min, component_
     print(f"\t{G}")
 
     print(f"Exporting graph to {foreign_id}.graphml")
-    visualize.export_graphml(G, f"{foreign_id}.graphml")
+    with open(f"{foreign_id}.graphml", 'w+') as fd:
+        visualize.export_graphml(G, fd)
 
     component_size_range = (component_size_min, component_size_max)
     print(f"Filtering to components with size in the range {component_size_range}")
