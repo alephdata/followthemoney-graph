@@ -36,7 +36,6 @@ def aleph_get_qparts(base_url, q_parts, *args, max_query_length=3600, **kwargs):
             # TODO: Turn this into a binary search?
             url = None
             for i in range(len(q_parts)):
-                q_test = join_qs()
                 url_test = _make_url_qparts(base_url, q_parts[:i], *args, **kwargs)
                 url_len = len(url_test)
                 if url_len > max_query_length:
@@ -274,6 +273,8 @@ def expand_interval(
     schemas = [model.get(s) for s in schematas]
     in_edge_properties = [s.edge_source for s in schemas]
     out_edge_properties = [s.edge_target for s in schemas]
+    in_edge_schemas = [s.source_prop.range for s in schemas]
+    out_edge_schemas = [s.target_prop.range for s in schemas]
     if not (in_edge_properties and out_edge_properties):
         raise ValueError(f"Schematas have no edges: {schematas}")
     filters = filters or []
@@ -287,19 +288,26 @@ def expand_interval(
                 if in_edges:
                     q_parts.extend(
                         gen_q_part(f"properties.{in_edge_property}", proxy.id)
-                        for in_edge_property in in_edge_properties
+                        for in_edge_property, in_schema in zip(
+                            in_edge_properties, in_edge_schemas
+                        )
+                        if proxy.schema.is_a(in_schema)
                     )
                 if out_edges:
                     q_parts.extend(
                         gen_q_part(f"properties.{out_edge_property}", proxy.id)
-                        for out_edge_property in out_edge_properties
+                        for out_edge_property, out_schema in zip(
+                            out_edge_properties, out_edge_schemas
+                        )
+                        if proxy.schema.is_a(out_schema)
                     )
-            intervals = aleph_get_qparts("entities", q_parts, filters=filters)
-            for interval in intervals:
-                if interval["id"] not in G:
-                    edge = parse_edge(interval)
-                    log.debug(f"Adding entity: {edge}")
-                    G.add_proxies(edge["in_proxies"])
-                    G.add_proxies(edge["out_proxies"])
-                    G.add_proxy(edge["edge"])
+            if q_parts:
+                intervals = aleph_get_qparts("entities", q_parts, filters=filters)
+                for interval in intervals:
+                    if interval["id"] not in G:
+                        edge = parse_edge(interval)
+                        log.debug(f"Adding entity: {edge}")
+                        G.add_proxies(edge["in_proxies"])
+                        G.add_proxies(edge["out_proxies"])
+                        G.add_proxy(edge["edge"])
         return G.get_changes()
