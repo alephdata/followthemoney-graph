@@ -2,7 +2,7 @@ import logging
 from functools import lru_cache
 from copy import deepcopy
 
-from alephclient.api import AlephAPI, APIResultSet, AlephException
+from alephclient.api import AlephAPI, EntityResultSet, AlephException
 from tqdm.autonotebook import tqdm
 
 from followthemoney import model
@@ -21,22 +21,29 @@ def aleph_get(url, *args, **kwargs):
     return _alephget(fullurl)
 
 
-def aleph_get_qparts(base_url, q_parts, *args, max_query_length=3600, **kwargs):
+def aleph_get_qparts(
+    base_url, q_parts, *args, max_query_length=3600, merge="or", **kwargs
+):
     """
     We take a list of query parts to get OR'd together. The queries are chunked
     so that the length is up to 3600 characters long in order to make sure we
     don't get rejected from aleph for having too long of a URL. The limit is
     technically 4096, but we'd like to leave a buffer just in ase
     """
-    url = _make_url_qparts(base_url, q_parts, *args, **kwargs)
+    if not q_parts:
+        return
+    url = _make_url_qparts(base_url, q_parts, *args, merge=merge, **kwargs)
     if len(url) <= max_query_length:
         yield from _alephget(url)
     else:
+        results = []
         while q_parts:
             # TODO: Turn this into a binary search?
             url = None
             for i in range(len(q_parts)):
-                url_test = _make_url_qparts(base_url, q_parts[:i], *args, **kwargs)
+                url_test = _make_url_qparts(
+                    base_url, q_parts[:i], *args, merge=merge, **kwargs
+                )
                 url_len = len(url_test)
                 if url_len > max_query_length:
                     break
@@ -44,11 +51,18 @@ def aleph_get_qparts(base_url, q_parts, *args, max_query_length=3600, **kwargs):
             else:
                 i += 1
             q_parts = q_parts[i:]
-            yield from _alephget(url)
+            if merge.lower() == "or":
+                yield from _alephget(url)
+            else:
+                result = {r["id"]: r for r in _alephget(url)}
+        if results and merge.lower() == "and":
+            keys = set.intersection(*[set(r) for r in result])
+            for key in keys:
+                yield results[0][key]
 
 
-def _make_url_qparts(url, q_parts, *args, **kwargs):
-    q = "({})".format(" OR ".join(q_parts))
+def _make_url_qparts(url, q_parts, merge="or", *args, **kwargs):
+    q = f" {merge.upper()} ".join(q_parts)
     return alephclient._make_url(url, q, *args, **kwargs)
 
 
@@ -56,15 +70,16 @@ def clean_q_value(value):
     return value.replace('"', '\\"')
 
 
-def gen_q_part(field, value):
-    value = clean_q_value(value)
-    return f'(_exists_:"{field}" AND {field}:"{value}")'
+def gen_q_part(field, values):
+    values = map(clean_q_value, values)
+    value = " OR ".join(f'"{v}"' for v in values)
+    return f'(_exists_:"{field}" AND {field}:({value}))'
 
 
 def _alephget(url):
     try:
         log.debug(f"Fetching from server: {url}")
-        return APIResultSet(alephclient, url)
+        return EntityResultSet(alephclient, url, publisher=True)
     except AlephException:
         log.exception("Error calling Aleph API")
         return []
@@ -117,6 +132,16 @@ def add_aleph_collection(G, foreign_key, include=None, schema=None, publisher=Tr
         return G.get_changes()
 
 
+def flag_list(G, list_id, flag):
+    with EntityGraphTracker(G) as G:
+        url = f"entitysets/{list_id}/entities"
+        for entity in aleph_get(url):
+            if entity["id"] in G:
+                proxy = parse_entity(entity)
+                G.set_proxy_flags(proxy, flag=True)
+        return G.get_changes()
+
+
 def enrich_profiles(G, force=False):
     with EntityGraphTracker(G) as G:
         for canon_id, proxy in track_node_tag(G, "aleph_enrich_profile", force=force):
@@ -139,7 +164,11 @@ def enrich_profiles(G, force=False):
         return G.get_changes()
 
 
-def on_properties(G, properties=None, schematas=("Thing",), filters=None):
+def on_properties(
+    G, properties=None, schematas=("Thing",), require_properties="any", filters=None
+):
+    assert require_properties in ("any", "all")
+    merge = "and" if require_properties == "all" else "any"
     properties = set(properties or [])
     if isinstance(schematas, str):
         schematas = [schematas]
@@ -162,15 +191,13 @@ def on_properties(G, properties=None, schematas=("Thing",), filters=None):
         )
         if not search_properties:
             continue
-        # TODO: try doing the following instead of OR'ing everything:
-        # (prop.A = i OR prop.A = j) AND (prop.B = k OR prop.B = l)
+        elif require_properties == "all" and len(properties) != len(search_properties):
+            continue
         q_parts = [
-            gen_q_part(prop, value)
-            for prop, values in search_properties.items()
-            for value in values
+            gen_q_part(prop, values) for prop, values in search_properties.items()
         ]
         log.debug(f"Searching for: {len(q_parts)}: {filters}")
-        entities = aleph_get_qparts("entities", q_parts, limit=200, filters=filters)
+        entities = aleph_get_qparts("entities", q_parts, merge=merge, filters=filters)
         connected_proxies = []
         for entity in entities:
             try:
@@ -228,7 +255,7 @@ def enrich_xref(
     collection = alephclient.get_collection_by_foreign_id(foreign_id)
     collection_id = collection["id"]
     with EntityGraphTracker(G) as G:
-        xrefs = aleph_get(f"collections/{collection_id}/xref")
+        xrefs = alephclient.get_collection_xref(collection_id, publisher=True)
         for xref in tqdm(xrefs):
             if xref["score"] < min_score:
                 log.debug(
@@ -259,6 +286,27 @@ def enrich_xref(
             G.add_proxy(entity_proxy)
             G.add_proxy(match_proxy)
             G.merge_proxies(entity_proxy, match_proxy)
+        return G.get_changes()
+
+
+def expand(G, schematas=("Interval",), filters=None, force=False):
+    if isinstance(schematas, str):
+        schematas = [schematas]
+    filters = filters or []
+    filters.extend(("schemata", schemata) for schemata in schematas)
+    tag = f'aleph_expand_{"_".join(schematas)}'
+    with EntityGraphTracker(G) as G:
+        for canon_id, datas in track_node_tag(G, tag, force=force):
+            log.debug(f"Finding {schematas} edges for: {canon_id}")
+            q_parts = [f"entities:{d['proxy'].id}" for d in datas]
+            edges = aleph_get_qparts("entities", q_parts, filters=filters)
+            for edge in edges:
+                if edge["id"] not in G:
+                    e = parse_edge(edge)
+                    log.debug(f"Adding entity: {e}")
+                    G.add_proxies(e["in_proxies"])
+                    G.add_proxies(e["out_proxies"])
+                    G.add_proxy(e["edge"])
         return G.get_changes()
 
 

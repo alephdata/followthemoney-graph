@@ -3,6 +3,20 @@ import networkx as nx
 from ..entity_graph import EntityGraph
 
 
+def paths(G, source_filter, target_filter, directed=True):
+    if directed:
+        graph = g.network
+    else:
+        graph = g.network.to_undirected(as_view=True)
+    for source_node in G.get_nodes(**source_filter):
+        shortest_path = None
+        for target_node in G.get_nodes(**target_filter):
+            path = nx.shortest_path(graph, source_node, target_node)
+            if shortest_path is None or len(path) < shortest_path:
+                shortest_path = path
+        yield shortest_path
+
+
 def filter_kcore(G, k, copy=False):
     network = G.network
     for i in range(k):
@@ -49,4 +63,3 @@ def filter_component_size(G, size_range, copy=False):
     if copy:
         subgraph = subgraph.copy()
     return EntityGraph.from_networkx(subgraph)
-
