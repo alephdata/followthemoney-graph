@@ -10,11 +10,10 @@ def track_node_tag(G, flag, force=False):
     # pre-get all the applicable nodes since we are making some in-place
     # changes
     if force:
-        nodes = list(G.get_node_proxies())
+        nodes = list(G.nodes())
     else:
-        nodes = list(G.get_node_proxies(**{flag: False}))
-    log.debug(f"Processing nodes: {flag}: {len(nodes)}")
-    for canon_id, proxy in tqdm(nodes):
-        yield canon_id, proxy
-        G.set_proxy_flags(proxy, **{flag: True})
+        nodes = list(G.nodes(**{flag: False}))
+    for node in tqdm(nodes):
+        yield node
+        node.set_flags(**{flag: True})
 

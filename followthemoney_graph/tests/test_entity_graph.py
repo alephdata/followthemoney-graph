@@ -4,7 +4,7 @@ import random
 import logging
 import string
 
-from followthemoney_graph.entity_graph import EntityGraph
+from followthemoney_graph.backends.networkx import NetworkxEntityGraph as EntityGraph
 
 fmt = "%(name)s [%(levelname)s] %(message)s"
 logging.basicConfig(level=logging.DEBUG, format=fmt)
@@ -14,6 +14,16 @@ def random_proxies(schema="LegalEntity"):
     proxy = model.make_entity(schema)
     proxy.add("name", "".join(random.sample(string.ascii_letters, 8)))
     proxy.make_id(random.sample(string.ascii_letters, 8))
+    return proxy
+
+
+def create_link(sources, targets):
+    proxy = model.make_entity("UnknownLink")
+    proxy.make_id(random.sample(string.ascii_letters, 8))
+    for s in sources:
+        proxy.add("subject", s)
+    for t in targets:
+        proxy.add("object", t)
     return proxy
 
 
@@ -28,10 +38,7 @@ def test_create_nodes():
 
 def test_create_edges():
     proxies = [random_proxies() for _ in range(10)]
-    edges = [
-        EntityGraph.create_edge_entity_from_proxies([proxies[i]], [proxies[-i]])
-        for i in range(len(proxies) // 2)
-    ]
+    edges = [create_link([proxies[i]], [proxies[-i]]) for i in range(len(proxies) // 2)]
 
     G = EntityGraph()
     G.add_proxies(proxies)
@@ -44,42 +51,42 @@ def test_create_edges():
 def test_merge():
     proxies = [random_proxies() for _ in range(3)]
     edges = [
-        EntityGraph.create_edge_entity_from_proxies([proxies[2]], [proxies[1]]),
-        EntityGraph.create_edge_entity_from_proxies([proxies[0]], [proxies[2]]),
-        EntityGraph.create_edge_entity_from_proxies([proxies[1]], [proxies[2]]),
+        create_link([proxies[2]], [proxies[1]]),
+        create_link([proxies[0]], [proxies[2]]),
+        create_link([proxies[1]], [proxies[2]]),
     ]
 
     G = EntityGraph()
     G.add_proxies(proxies)
     G.add_proxies(edges)
     G.merge_proxies(proxies[0], proxies[1])
-    node = G.describe_proxy(proxies[0])
+    node = G.get_node_by_proxy(proxies[0])
 
-    assert len(G) == 6
-    assert len(node["data"]) == 2
-    assert len(node["in_edges"]) == 1
-    assert len(node["out_edges"]) == 2
+    assert len(list(G.nodes())) == 5
+    assert len(node.parts) == 2
+    assert len(G.get_node_in_edges(node)) == 1
+    assert len(G.get_node_out_edges(node)) == 2
 
 
 def test_merge_self_loop():
     proxies = [random_proxies() for _ in range(3)]
     edges = [
-        EntityGraph.create_edge_entity_from_proxies([proxies[0]], [proxies[1]]),
-        EntityGraph.create_edge_entity_from_proxies([proxies[0]], [proxies[2]]),
-        EntityGraph.create_edge_entity_from_proxies([proxies[1]], [proxies[1]]),
-        EntityGraph.create_edge_entity_from_proxies([proxies[1]], [proxies[2]]),
+        create_link([proxies[0]], [proxies[1]]),
+        create_link([proxies[0]], [proxies[2]]),
+        create_link([proxies[1]], [proxies[1]]),
+        create_link([proxies[1]], [proxies[2]]),
     ]
 
     G = EntityGraph()
     G.add_proxies(proxies)
     G.add_proxies(edges)
     G.merge_proxies(proxies[0], proxies[1])
-    node = G.describe_proxy(proxies[0])
+    node = G.get_node_by_proxy(proxies[0])
 
-    assert len(G) == 7
-    assert len(node["data"]) == 2
-    assert len(node["in_edges"]) == 2
-    assert len(node["out_edges"]) == 4
+    assert len(G) == 6
+    assert len(node.proxies) == 2
+    assert len(G.get_node_in_edges(node)) == 2
+    assert len(G.get_node_out_edges(node)) == 4
 
 
 def test_ensure_flag():
@@ -87,9 +94,8 @@ def test_ensure_flag():
     G = EntityGraph()
     G.add_proxies(proxies)
     G.ensure_flag(test=True)
-    for p in proxies:
-        node = G.describe_proxy(p)
-        assert [d["flags"]["test"] is True for d in node["data"]]
+    for node in G.nodes():
+        assert node.has_flags(test=True)
 
 
 def test_get_nodes():
@@ -97,19 +103,19 @@ def test_get_nodes():
     G = EntityGraph()
     G.add_proxies(proxies)
     G.ensure_flag(test=True)
-    G.set_proxy_flags(proxies[0], test=False)
-    G.set_proxy_flags(proxies[1], test=None)
+    G.get_node_by_proxy(proxies[0]).set_flags(test=False)
+    G.get_node_by_proxy(proxies[1]).set_flags(test=None)
     G.merge_proxies(*proxies[2:])
 
-    assert len(list(G.get_node_proxies())) == 10
-    assert len(list(G.get_node_proxies(test=True))) == 8
-    assert len(list(G.get_node_proxies(test=False))) == 1
-    assert len(list(G.get_node_proxies(test=None))) == 1
+    assert len(list(G.proxies())) == 10
+    assert len(list(G.proxies(test=True))) == 8
+    assert len(list(G.proxies(test=False))) == 1
+    assert len(list(G.proxies(test=None))) == 1
 
-    assert len(list(G.get_nodes())) == 3
-    assert len(list(G.get_nodes(test=True))) == 1
-    assert len(list(G.get_nodes(test=False))) == 1
-    assert len(list(G.get_nodes(test=None))) == 1
+    assert len(list(G.nodes())) == 3
+    assert len(list(G.nodes(test=True))) == 1
+    assert len(list(G.nodes(test=False))) == 1
+    assert len(list(G.nodes(test=None))) == 1
 
 
 def test_intersect_basic():
@@ -143,14 +149,14 @@ def test_intersect_merge():
     g_a.add_proxies(common)
 
     g_a.merge_proxies(proxies_a[0], common[0])
-    g_a.add_proxy(EntityGraph.create_edge_entity_from_proxies([common[3]], [common[4]]))
-    assert len(g_a) == 11
+    g_a.add_proxy(create_link([common[3]], [common[4]]))
+    assert len(g_a) == 10
 
     g_b = EntityGraph()
     g_b.add_proxies(proxies_b)
     g_b.add_proxies(common)
     g_b.merge_proxies(proxies_b[0], common[1])
-    assert len(g_b) == 10
+    assert len(g_b) == 9
 
     g = EntityGraph.intersect(g_a, g_b)
 
@@ -166,6 +172,6 @@ def test_intersect_merge():
     assert all(p.id not in g for p in proxies_a[1:])
     assert all(p.id not in g for p in proxies_b[1:])
 
-    node = g.describe_proxy(common[3])
-    assert len(list(g.get_edge_nodes())) == 1
-    assert len(node["out_edges"]) == 1
+    node = g.get_node_by_proxy(common[3])
+    assert len(list(g.edges())) == 1
+    assert len(list(G.get_node_out_edges(node))) == 1
