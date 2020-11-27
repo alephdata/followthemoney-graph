@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 class EntityGraph(object):
     def __init__(self):
         self._id_to_canonical = {}
-        self.info_pending = set()
+        self._info_pending = set()
 
     def edges(self, **flags):
         yield from self._iter_edges(**flags)
@@ -48,7 +48,7 @@ class EntityGraph(object):
         stub.id = proxy_id
         if proxy_id in self:
             return self.get_node_by_proxy(stub)
-        node = self.add_proxy(stub)
+        node, _ = self.add_proxy(stub)
         self._info_pending.add(stub)
         return node
 
@@ -80,10 +80,14 @@ class EntityGraph(object):
             left_node.merge(right_node)
             for pid in right_node.parts:
                 self._id_to_canonical[pid] = left_node.id
-            for source, target, key, data in self._get_node_in_edges(right_node.id):
-                self._add_edge(source, left_node, key=key, **data)
-            for source, target, key, data in self._get_node_out_edges(right_node.id):
-                self._add_edge(left_node, target, key=key, **data)
+            for source_id, target_id, key, data in self._get_node_in_edges(
+                right_node.id
+            ):
+                self._add_edge(source_id, left_node.id, key=key, **data)
+            for source_id, target_id, key, data in self._get_node_out_edges(
+                right_node.id
+            ):
+                self._add_edge(left_node.id, target_id, key=key, **data)
             self._remove_node(right_node.id)
         return left_node
 
@@ -138,7 +142,15 @@ class EntityGraph(object):
         return proxy_id in self._id_to_canonical
 
     def __len__(self):
+        return len(self._id_to_canonical)
+
+    @property
+    def n_nodes(self):
         return self._get_n_nodes()
+
+    @property
+    def n_edges(self):
+        return self._get_n_edges()
 
     def __repr__(self):
         n_nodes = self._get_n_nodes()

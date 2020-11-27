@@ -1,34 +1,20 @@
-def get_node_label(G, node, data, maxlen=32):
-    data = list(data)
-    try:
-        name = next(d["proxy"].names[0] for d in data if d["proxy"].names)
-    except StopIteration:
-        name = "N/A"
+def get_node_label(G, node, maxlen=32):
+    if node.schema.edge:
+        name = node.schema.name
+    else:
+        try:
+            name = node.names[0]
+        except IndexError:
+            name = "N/A"
     if len(name) > maxlen:
-        name = name[:maxlen] + "..."
+        name = name[: maxlen - 3] + "..."
     return f"{name}"
 
 
-def get_node_desc(G, node, data):
-    d = G.describe_node(node)
-    desc = f"{len(data)} Proxes; In Edges: {len(d['in_edges'])}; Out Edges: {len(d['out_edges'])}<br>"
-    desc += f"Schema: {data[0]['proxy'].schema.name}<br>"
-    desc += "<br>".join(f"{p}: {values[0]}" for p, values in data.properties().items())
-    return desc
-
-
-def get_edge_label(G, node, data):
-    data = list(data)
-    return f"{data[0]['proxy'].schema.name}"
-
-
-def get_edge_desc(G, edge, data):
-    src_node, dst_node = G.get_nodes(edge[0], edge[1])
-    src_label = get_node_label(G, *src_node)
-    dst_label = get_node_label(G, *dst_node)
-    desc = f"{src_label} -> {dst_label}<br>"
-    desc += f"Schema: {data[0]['proxy'].schema.name}<br>"
-    desc += "<br>".join(f"{p}: {values[0]}" for p, values in data.properties().items())
+def get_node_desc(G, node):
+    desc = f"{len(node.proxies)} Proxes<br>"
+    desc += f"Schema: {node.schema.name}<br>"
+    desc += "<br>".join(f"{p}: {node[0]}" for p, values in node.properties.items())
     return desc
 
 

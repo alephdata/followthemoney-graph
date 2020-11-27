@@ -1,9 +1,8 @@
 import logging
 from functools import lru_cache
 from copy import deepcopy
-from itertools import groupby
-from multiprocessing import Pool
-from functools import partial
+from functools import partial, wraps
+from concurrent.futures import ThreadPoolExecutor
 
 from alephclient.api import AlephAPI, EntityResultSet, AlephException
 from tqdm.autonotebook import tqdm
@@ -14,13 +13,21 @@ from followthemoney.exc import InvalidData
 
 log = logging.getLogger(__name__)
 
-alephclient = AlephAPI()
+alephclient = AlephAPI(timeout=30)
 alephclient._request = lru_cache(2048)(alephclient._request)
 
 
-def aleph_initializer():
+def aleph_initializer(initializer=None):
     global alephclient
-    alephclient = AlephAPI()
+    alephclient = AlephAPI(timeout=30)
+    if initializer is not None:
+        initializer()
+
+
+@wraps(ThreadPoolExecutor)
+def AlephPool(*args, **kwargs):
+    kwargs["initializer"] = aleph_initializer(initializer=kwargs.get("initializer"))
+    return ThreadPoolExecutor(*args, **kwargs)
 
 
 def aleph_get(api, url, *args, **kwargs):
@@ -46,7 +53,6 @@ def aleph_get_qparts(
     else:
         results = []
         while q_parts:
-            # TODO: Turn this into a binary search?
             url = None
             for i in range(len(q_parts)):
                 url_test = _make_url_qparts(
@@ -88,28 +94,33 @@ def _alephget(api, url):
     try:
         log.debug(f"Fetching from server: {url}")
         return EntityResultSet(api, url, publisher=True)
-    except AlephException:
-        log.exception("Error calling Aleph API")
+    except AlephException as e:
+        log.critical(f"Error calling Aleph API: {e}")
         return []
 
 
-def parse_edge(edge):
+def parse_nested(edge):
     schema = model.get(edge["schema"])
     in_edge_property = schema.edge_source
     out_edge_property = schema.edge_target
-    ins = [parse_entity(s) for s in edge["properties"].get(in_edge_property, [])]
-    outs = [parse_entity(s) for s in edge["properties"].get(out_edge_property, [])]
-    edge_proxy = parse_entity(edge)
-    return {"in_proxies": ins, "out_proxies": outs, "edge": edge_proxy}
+    for p in (in_edge_property, out_edge_property):
+        for item in edge["properties"].get(p, []):
+            if isinstance(item, dict):
+                log.debug(f"Found nested item: {item['id']}")
+                yield parse_entity(item)
+    yield parse_entity(edge)
 
 
 def parse_entity(entity):
-    entity = deepcopy(entity)
-    for key, values in entity["properties"].items():
-        for i, value in enumerate(values):
-            if isinstance(value, dict):
-                values[i] = value.get("id")
-    return model.get_proxy(entity)
+    try:
+        entity = deepcopy(entity)
+        for key, values in entity.get("properties", {}).items():
+            for i, value in enumerate(values):
+                if isinstance(value, dict):
+                    values[i] = value.get("id")
+        return model.get_proxy(entity)
+    except AttributeError:
+        return None
 
 
 def add_aleph_entities(G, *entity_ids, publisher=True):
@@ -207,77 +218,93 @@ def enrich_xref(
     return N
 
 
-def _enrich_similar(proxy, min_score):
-    data = {
-        "schema": proxy.schema.name,
-        "properties": proxy.properties,
-    }
-    matches = alephclient.match(data, publisher=True)
-    data = []
-    for match in matches:
-        if match["score"] <= min_score:
-            break
-        data.append(match)
-    return data
+def _enrich_similar(item, min_score):
+    try:
+        name, properties = item
+        data = {
+            "schema": name,
+            "properties": properties,
+        }
+        matches = alephclient.match(data, publisher=True)
+        data = []
+        for match in matches:
+            if match["score"] <= min_score:
+                break
+            data.append(match)
+        return data
+    except AlephException as e:
+        log.critical(f"Aleph Exception: {e}")
+        return None
+    except Exception:
+        log.exception("General enrich Exception")
+        return None
 
 
-def enrich_similar(G, min_score=80, force=False):
-    flag = "aleph_expand"
+def enrich_similar(G, min_score=120, mapper=map):
     N = 0
+    nodes = list(
+        node for node in G.nodes(aleph_enrich_similar=None) if node.schema.matchable
+    )
     task = partial(_enrich_similar, min_score=min_score)
-    nodes = list(G.nodes(**{flag: None}))
-    proxies = (n.golden_proxy for n in nodes)
-    N = len(nodes)
-    with Pool(initializer=aleph_initializer) as pool:
-        results = zip(nodes, pool.imap(task, proxies, chunksize=32))
-        for node, matches in tqdm(results, total=N):
-            node.set_flags(**{flag: True})
-            for match in matches:
-                match_proxy = parse_entity(match)
-                try:
-                    _, is_new = G.add_proxy(match_proxy, node_id=node.id)
-                except InvalidData:
-                    G.add_proxy(match_proxy)
-                    link = model.make_entity("UnknownLink")
-                    link.add("subject", node.parts[0])
-                    link.add("object", match_proxy.id)
-                    link.make_id(node.parts[0], match_proxy.id)
-                    _, is_new = G.add_proxy(link)
-                except KeyError as e:
-                    raise e
-                N += int(is_new)
+    task_args = ((n.schema.name, n.properties) for n in nodes)
+    results = zip(nodes, mapper(task, task_args))
+    for node, matches in tqdm(results, total=len(nodes)):
+        if matches is None:
+            continue
+        for match in matches:
+            match_proxy = parse_entity(match)
+            try:
+                node, is_new = G.add_proxy(match_proxy, node_id=node.id)
+            except InvalidData:
+                G.add_proxy(match_proxy)
+                link = model.make_entity("UnknownLink")
+                link.add("subject", node.parts[0])
+                link.add("object", match_proxy.id)
+                link.make_id(node.parts[0], match_proxy.id)
+                _, is_new = G.add_proxy(link)
+            except KeyError as e:
+                raise e
+            N += int(is_new)
+        node.set_flags(aleph_enrich_similar=True)
     return N
 
 
 def _expand(item, filters):
-    pids, is_edge = item
-    if is_edge:
-        return []
-    q_parts = [f"entities:{pid}" for pid in pids]
-    edges = aleph_get_qparts(alephclient, "entities", q_parts, filters=filters)
-    return list(edges)
+    try:
+        pids, is_edge = item
+        if is_edge:
+            return []
+        q_parts = [f"entities:{pid}" for pid in pids]
+        edges = aleph_get_qparts(
+            alephclient, "entities", q_parts, filters=filters, merge="or"
+        )
+        return list(edges)
+    except AlephException as e:
+        log.critical(f"Aleph Exception: {len(q_parts)} query parts: {e}")
+        return None
+    except Exception:
+        log.exception("General expand exception")
+        return None
 
 
-def expand(G, schematas=("Interval",), filters=None, force=False):
+def expand(G, schematas=("Interval",), filters=None, mapper=map):
     if isinstance(schematas, str):
         schematas = [schematas]
     filters = filters or []
     filters.extend(("schemata", schemata) for schemata in schematas)
     flag = f'aleph_expand_{"_".join(schematas)}'
-    nodes = list(G.nodes(**{flag: None}))
+    nodes = list(node for node in G.nodes(**{flag: None}) if not node.schema.edge)
     task = partial(_expand, filters=filters)
     task_args = ((n.parts, n.schema.edge) for n in nodes)
-    N = len(nodes)
-    with Pool(initializer=aleph_initializer) as pool:
-        results = zip(nodes, pool.imap(task, task_args, chunksize=32))
-        for node, edges in tqdm(results, total=N):
-            node.set_flags(**{flag: True})
-            for edge in edges:
-                if edge["id"] not in G:
-                    e = parse_edge(edge)
-                    N += 1
-                    log.debug(f"Adding entity: {e}")
-                    G.add_proxies(e["in_proxies"])
-                    G.add_proxies(e["out_proxies"])
-                    G.add_proxy(e["edge"])
+    N = 0
+    results = zip(nodes, mapper(task, task_args))
+    for node, edges in tqdm(results, total=len(nodes)):
+        if edges is None:
+            continue
+        for edge in edges:
+            if edge["id"] not in G:
+                log.debug(f"Adding edge: {edge}")
+                result = G.add_proxies(parse_nested(edge))
+                N += sum(int(is_new) for _, is_new in result)
+        node.set_flags(**{flag: True})
     return N

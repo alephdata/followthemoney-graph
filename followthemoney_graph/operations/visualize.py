@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 import networkx as nx
 
 from .utils import get_node_label, get_node_desc
-from .utils import get_edge_label, get_edge_desc
 from .utils import is_notebook
 
 

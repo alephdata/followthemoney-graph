@@ -16,6 +16,8 @@ class NetworkxEntityGraph(GraphBackend, EntityGraph):
         self.network.add_node(node.id, data=node)
 
     def _add_edge(self, source_id, target_id, key, **data):
+        assert source_id in self.network
+        assert target_id in self.network
         self.network.add_edge(source_id, target_id, key=key, **data)
 
     def _remove_node(self, node_id):
