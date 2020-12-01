@@ -18,19 +18,17 @@ def show_entity_graph_pyvis(G, filename, notebook=None):
     )
     net.barnes_hut()
 
-    for node_id, data in tqdm(G.get_nodes(), total=G.n_nodes):
+    for node in tqdm(G.nodes(), total=G.n_nodes):
         net.add_node(
-            node_id,
-            label=get_node_label(G, node_id, data),
-            title=get_node_desc(G, node_id, data),
+            node.id,
+            label=get_node_label(G, node),
+            title=get_node_desc(G, node),
         )
 
-    for (source, target, key), data in tqdm(G.get_edge_nodes(), total=G.n_edges):
+    for source, target, key, data in tqdm(G.edges(), total=G.n_edges):
         net.add_edge(
             source,
             target,
-            label=get_edge_label(G, (source, target, key), data),
-            title=get_edge_desc(G, (source, target, key), data),
         )
     net.show_buttons()
     return net.show(filename)
@@ -40,10 +38,7 @@ def show_entity_graph(G):
     pos = nx.fruchterman_reingold_layout(G.network)
     fig = plt.figure()
 
-    node_labels = {node: get_node_label(G, node, data) for node, data in G.get_nodes()}
-    edge_labels = {
-        edge: get_edge_label(G, edge, data) for edge, data in G.get_edge_nodes()
-    }
+    node_labels = {node: get_node_label(G, node) for node in G.nodes()}
 
     nx.draw(
         G.network,
@@ -55,13 +50,6 @@ def show_entity_graph(G):
         node_color="pink",
         alpha=0.9,
         labels=node_labels,
-    )
-
-    nx.draw_networkx_edge_labels(
-        G.network,
-        pos,
-        edge_labels=edge_labels,
-        font_color="red",
     )
     plt.axis("off")
     return fig

@@ -32,4 +32,3 @@ class GraphBackend:
 
     def _get_node_out_edges(self, node_id):
         raise NotImplementedError
-

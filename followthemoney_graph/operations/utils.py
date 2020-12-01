@@ -1,11 +1,8 @@
 def get_node_label(G, node, maxlen=32):
-    if node.schema.edge:
+    try:
+        name = node.names[0]
+    except IndexError:
         name = node.schema.name
-    else:
-        try:
-            name = node.names[0]
-        except IndexError:
-            name = "N/A"
     if len(name) > maxlen:
         name = name[: maxlen - 3] + "..."
     return f"{name}"
@@ -14,7 +11,7 @@ def get_node_label(G, node, maxlen=32):
 def get_node_desc(G, node):
     desc = f"{len(node.proxies)} Proxes<br>"
     desc += f"Schema: {node.schema.name}<br>"
-    desc += "<br>".join(f"{p}: {node[0]}" for p, values in node.properties.items())
+    desc += "<br>".join(f"{p}: {values[0]}" for p, values in node.properties.items())
     return desc
 
 

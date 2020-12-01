@@ -1,13 +1,25 @@
 import networkx as nx
 
 from ..entity_graph import EntityGraph
+from ..node import Node
+
+
+def find_subgraphs_like(G, match):
+    match_fxn = nx.algorithms.isomorphism.generic_node_match(
+        "data", Node(), lambda left, right: left.match(right, ignore_edges=True)
+    )
+    matcher = nx.algorithms.isomorphism.GraphMatcher(
+        G.network, match.network, node_match=match_fxn
+    )
+    for result in matcher.subgraph_isomorphisms_iter():
+        yield {mid: G.get_node(nid) for nid, mid in result.items()}
 
 
 def paths(G, source_filter, target_filter, directed=True):
     if directed:
-        graph = g.network
+        graph = G.network
     else:
-        graph = g.network.to_undirected(as_view=True)
+        graph = G.network.to_undirected(as_view=True)
     for source_node in G.get_nodes(**source_filter):
         shortest_path = None
         for target_node in G.get_nodes(**target_filter):

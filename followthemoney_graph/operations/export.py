@@ -18,6 +18,7 @@ def export_graphml(G, filename):
             label=get_node_label(G, node),
             schema=node.schema.name,
             n_proxies=len(node.proxies),
+            **{flag: value for flag, value in node.flags.items()},
             **{p: ", ".join(values) for p, values in node.properties.items()},
         )
 
@@ -32,8 +33,9 @@ def export_graphml(G, filename):
 
 def export_followthemoney_json(G, fd):
     for node in tqdm(G.nodes(), total=G.n_nodes):
-        fd.write(json.dumps(node.golden_proxy.to_dict()))
-        fd.write("\n")
         for proxy in node.proxies:
-            fd.write(json.dumps(proxy.to_dict()))
+            proxy_dict = proxy.to_dict()
+            proxy_dict["profile_id"] = node.id
+            proxy_dict["flags"] = node.flags
+            fd.write(json.dumps(proxy_dict))
             fd.write("\n")

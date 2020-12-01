@@ -9,9 +9,11 @@ import os
 api = None
 
 
-def init_aleph():
+def init_aleph(lock=None):
     global api
     api = AlephAPI()
+    if lock is not None:
+        tqdm.set_lock(lock)
 
 
 class Components:
@@ -60,6 +62,7 @@ def calculate_components(collection):
 
 def process_collection(collection):
     fid = collection["foreign_id"]
+    fid = fid.replace("/", "")
     fname = f"./dataset_components/{fid}.json"
     if os.path.exists(fname):
         return
@@ -80,7 +83,8 @@ if __name__ == "__main__":
     init_aleph()
     collections = api.filter_collections("*")
     N = collections.result["total"]
-    with mp.Pool(initializer=init_aleph) as p:
+    tqdm.set_lock(mp.RLock())
+    with mp.Pool(processes=4, initializer=init_aleph, initargs=(tqdm.get_lock(),)) as p:
         results = p.imap_unordered(process_collection, collections, chunksize=32)
         for _ in tqdm(results, total=N, position=0):
             pass

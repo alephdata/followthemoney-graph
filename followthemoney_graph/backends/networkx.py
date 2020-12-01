@@ -7,7 +7,11 @@ from followthemoney_graph.entity_graph import EntityGraph
 class NetworkxEntityGraph(GraphBackend, EntityGraph):
     def __init__(self):
         super().__init__()
-        self.network = nx.MultiDiGraph()
+        self.network = nx.MultiGraph()
+
+    @classmethod
+    def from_file(cls, *args, **kwargs):
+        return super().from_file(*args, **kwargs)
 
     def _has_node(self, node_id):
         return node_id in self.network
@@ -46,8 +50,5 @@ class NetworkxEntityGraph(GraphBackend, EntityGraph):
     def _get_node(self, node_id):
         return self.network.nodes[node_id]["data"]
 
-    def _get_node_in_edges(self, node_id):
-        return self.network.in_edges(node_id, data=True, keys=True)
-
-    def _get_node_out_edges(self, node_id):
-        return self.network.out_edges(node_id, data=True, keys=True)
+    def _get_node_edges(self, node_id):
+        return self.network.edges(node_id, data=True, keys=True)

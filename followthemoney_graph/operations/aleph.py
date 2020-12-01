@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from alephclient.api import AlephAPI, EntityResultSet, AlephException
 from tqdm.autonotebook import tqdm
+import requests
 
 from followthemoney import model
 from followthemoney.exc import InvalidData
@@ -20,6 +21,9 @@ alephclient._request = lru_cache(2048)(alephclient._request)
 def aleph_initializer(initializer=None):
     global alephclient
     alephclient = AlephAPI(timeout=30)
+    adapter = requests.adapters.HTTPAdapter(pool_connections=52)
+    alephclient.session.mount("http://", adapter)
+    alephclient.session.mount("https://", adapter)
     if initializer is not None:
         initializer()
 
@@ -95,16 +99,14 @@ def _alephget(api, url):
         log.debug(f"Fetching from server: {url}")
         return EntityResultSet(api, url, publisher=True)
     except AlephException as e:
-        log.critical(f"Error calling Aleph API: {e}")
+        log.warning(f"Error calling Aleph API: {url}: {e}")
         return []
 
 
 def parse_nested(edge):
     schema = model.get(edge["schema"])
-    in_edge_property = schema.edge_source
-    out_edge_property = schema.edge_target
-    for p in (in_edge_property, out_edge_property):
-        for item in edge["properties"].get(p, []):
+    for items in edge["properties"].values():
+        for item in items:
             if isinstance(item, dict):
                 log.debug(f"Found nested item: {item['id']}")
                 yield parse_entity(item)
@@ -140,27 +142,37 @@ def add_aleph_collection(G, foreign_key, include=None, schema=None, publisher=Tr
     entities = alephclient.stream_entities(
         collection, include=include, schema=schema, publisher=publisher
     )
-    edges = []
     for entity in entities:
         if entity["id"] not in G:
             proxy = parse_entity(entity)
-            if proxy.schema.edge:
-                edges.append(proxy)
-            else:
-                node, is_new = G.add_proxy(proxy)
-                N += int(is_new)
-    N += sum(int(is_new) for node, is_new in G.add_proxies(edges))
+            node, is_new = G.add_proxy(proxy)
+            N += int(is_new)
     return N
 
 
 def flag_list(G, list_id, flag):
-    url = f"entitysets/{list_id}/entities"
     N = 0
-    for entity in aleph_get(alephclient, url):
+    for item in alephclient.entitysetitems(list_id, publisher=True):
+        if item["judgement"] != "positive":
+            continue
+        entity = item["entity"]
+        entity["added_by_id"] = item["added_by_id"]
         if entity["id"] in G:
             proxy = parse_entity(entity)
             G.get_node_by_proxy(proxy).set_flags(**{flag: True})
             N += 1
+    return N
+
+
+def flag_lists(G, foreign_id):
+    collection = alephclient.get_collection_by_foreign_id(foreign_id)
+    lists = alephclient.entitysets(collection["id"], set_types=["list"])
+    N = 0
+
+    for list_ in tqdm(lists):
+        list_id = list_["id"]
+        flag = list_["label"]
+        N += flag_list(G, list_id, flag)
     return N
 
 
@@ -233,7 +245,7 @@ def _enrich_similar(item, min_score):
             data.append(match)
         return data
     except AlephException as e:
-        log.critical(f"Aleph Exception: {e}")
+        log.warning(f"Aleph Exception: {e}")
         return None
     except Exception:
         log.exception("General enrich Exception")
@@ -258,22 +270,18 @@ def enrich_similar(G, min_score=120, mapper=map):
             except InvalidData:
                 G.add_proxy(match_proxy)
                 link = model.make_entity("UnknownLink")
-                link.add("subject", node.parts[0])
+                for p in node.parts:
+                    link.add("subject", p)
                 link.add("object", match_proxy.id)
-                link.make_id(node.parts[0], match_proxy.id)
+                link.make_id(*node.parts, match_proxy.id)
                 _, is_new = G.add_proxy(link)
-            except KeyError as e:
-                raise e
             N += int(is_new)
         node.set_flags(aleph_enrich_similar=True)
     return N
 
 
-def _expand(item, filters):
+def _expand(pids, filters):
     try:
-        pids, is_edge = item
-        if is_edge:
-            return []
         q_parts = [f"entities:{pid}" for pid in pids]
         edges = aleph_get_qparts(
             alephclient, "entities", q_parts, filters=filters, merge="or"
@@ -287,7 +295,7 @@ def _expand(item, filters):
         return None
 
 
-def expand(G, schematas=("Interval",), filters=None, mapper=map):
+def expand(G, schematas=("Interval", "Thing"), filters=None, mapper=map):
     if isinstance(schematas, str):
         schematas = [schematas]
     filters = filters or []
@@ -295,7 +303,7 @@ def expand(G, schematas=("Interval",), filters=None, mapper=map):
     flag = f'aleph_expand_{"_".join(schematas)}'
     nodes = list(node for node in G.nodes(**{flag: None}) if not node.schema.edge)
     task = partial(_expand, filters=filters)
-    task_args = ((n.parts, n.schema.edge) for n in nodes)
+    task_args = (n.parts for n in nodes)
     N = 0
     results = zip(nodes, mapper(task, task_args))
     for node, edges in tqdm(results, total=len(nodes)):
