@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 class EntityGraph(object):
     def __init__(self):
         self._id_to_canonical = {}
-        self._info_pending = set()
+        self._stub_proxies = set()
 
     @classmethod
     def from_file(cls, fd):
@@ -46,10 +46,9 @@ class EntityGraph(object):
     def add_proxy(self, proxy, node_id=None):
         if proxy.id in self:
             cur_node = self.get_node_by_proxy(proxy)
-            if proxy.id in self._info_pending:
-                cur_node.discard(proxy)
-                cur_node.add_proxy(proxy)
-                self._info_pending.discard(proxy.id)
+            if proxy.id in self._stub_proxies:
+                cur_node.fill_stub(proxy)
+                self._stub_proxies.discard(proxy.id)
             if node_id is not None and cur_node.id != node_id:
                 if self._has_node(node_id):
                     node = self.get_node(node_id)
@@ -76,7 +75,7 @@ class EntityGraph(object):
         if proxy_id in self:
             return self.get_node_by_proxy(stub)
         node, _ = self.add_proxy(stub)
-        self._info_pending.add(stub.id)
+        self._stub_proxies.add(stub.id)
         return node
 
     def connect_edges(self, node):

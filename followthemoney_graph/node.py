@@ -36,6 +36,15 @@ class Node(MultiPartProxy):
             name for name, p in self.schema.properties.items() if not p.stub and p.range
         )
 
+    def fill_stub(self, proxy):
+        if proxy not in self.proxies:
+            raise ValueError
+        for p in self.proxies:
+            if p == proxy:
+                p.merge(proxy)
+                return p
+        raise IndexError
+
     def set_flags(self, **flag_values):
         self.flags.update(flag_values)
 

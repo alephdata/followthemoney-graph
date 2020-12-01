@@ -14,13 +14,13 @@ from followthemoney.exc import InvalidData
 
 log = logging.getLogger(__name__)
 
-alephclient = AlephAPI(timeout=30)
+alephclient = AlephAPI(timeout=60)
 alephclient._request = lru_cache(2048)(alephclient._request)
 
 
 def aleph_initializer(initializer=None):
     global alephclient
-    alephclient = AlephAPI(timeout=30)
+    alephclient = AlephAPI(timeout=60)
     adapter = requests.adapters.HTTPAdapter(pool_connections=52)
     alephclient.session.mount("http://", adapter)
     alephclient.session.mount("https://", adapter)
@@ -172,7 +172,12 @@ def flag_lists(G, foreign_id):
     for list_ in tqdm(lists):
         list_id = list_["id"]
         flag = list_["label"]
-        N += flag_list(G, list_id, flag)
+        try:
+            N += flag_list(G, list_id, flag)
+        except AlephException as e:
+            logging.critical(
+                f"Could not fetch list because of AlephException: {list_id}: {e}"
+            )
     return N
 
 
