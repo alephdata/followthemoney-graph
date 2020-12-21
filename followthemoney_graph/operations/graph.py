@@ -1,12 +1,15 @@
 import networkx as nx
+from tqdm.autonotebook import tqdm
 
 from ..entity_graph import EntityGraph
 from ..node import Node
 
 
-def find_subgraphs_like(G, match):
+def find_subgraphs_like(G, match, exact=True):
     match_fxn = nx.algorithms.isomorphism.generic_node_match(
-        "data", Node(), lambda left, right: left.match(right, ignore_edges=True)
+        "data",
+        Node(),
+        lambda left, right: left.match(right, ignore_edges=True, exact=exact),
     )
     matcher = nx.algorithms.isomorphism.GraphMatcher(
         G.network, match.network, node_match=match_fxn
@@ -15,18 +18,18 @@ def find_subgraphs_like(G, match):
         yield {mid: G.get_node(nid) for nid, mid in result.items()}
 
 
-def paths(G, source_filter, target_filter, directed=True):
-    if directed:
-        graph = G.network
-    else:
-        graph = G.network.to_undirected(as_view=True)
-    for source_node in G.get_nodes(**source_filter):
-        shortest_path = None
-        for target_node in G.get_nodes(**target_filter):
-            path = nx.shortest_path(graph, source_node, target_node)
-            if shortest_path is None or len(path) < shortest_path:
-                shortest_path = path
-        yield shortest_path
+def paths(G, source_nodes, target_nodes, max_length=None):
+    graph = G.network
+    target_nodes = tuple(target_nodes)
+    for source_node in tqdm(source_nodes):
+        shortest_length = max_length
+        for target_node in target_nodes:
+            try:
+                path = nx.shortest_path(graph, source_node.id, target_node.id)
+                if shortest_length is None or len(path) < shortest_length:
+                    yield [G.get_node(nid) for nid in path]
+            except nx.NetworkXNoPath:
+                continue
 
 
 def filter_kcore(G, k, copy=False):

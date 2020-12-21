@@ -21,8 +21,8 @@ def show_entity_graph_pyvis(G, filename, notebook=None):
     for node in tqdm(G.nodes(), total=G.n_nodes):
         net.add_node(
             node.id,
-            label=get_node_label(G, node),
-            title=get_node_desc(G, node),
+            label=get_node_label(node),
+            title=get_node_desc(node),
         )
 
     for source, target, key, data in tqdm(G.edges(), total=G.n_edges):
@@ -38,7 +38,7 @@ def show_entity_graph(G):
     pos = nx.fruchterman_reingold_layout(G.network)
     fig = plt.figure()
 
-    node_labels = {node: get_node_label(G, node) for node in G.nodes()}
+    node_labels = {node: get_node_label(node) for node in G.nodes()}
 
     nx.draw(
         G.network,

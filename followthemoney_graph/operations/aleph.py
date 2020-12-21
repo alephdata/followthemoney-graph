@@ -49,10 +49,17 @@ def aleph_get_qparts(
     don't get rejected from aleph for having too long of a URL. The limit is
     technically 4096, but we'd like to leave a buffer just in ase
     """
+    # <HACK dec14,2020, the big OR'd queries aren't working right now>
+    for q_part in q_parts:
+        url = _make_url_qparts(api, base_url, [q_part], *args, merge=merge, **kwargs)
+        yield from _alephget(api, url)
+    return
+    # </HACK>
     if not q_parts:
         return
     url = _make_url_qparts(api, base_url, q_parts, *args, merge=merge, **kwargs)
     if len(url) <= max_query_length:
+        print(url)
         yield from _alephget(api, url)
     else:
         results = []
@@ -125,14 +132,49 @@ def parse_entity(entity):
         return None
 
 
-def add_aleph_entities(G, *entity_ids, publisher=True):
+def _add_entity(entity_id, publisher):
+    try:
+        return alephclient.get_entity(entity_id, publisher=publisher)
+    except AlephException as e:
+        logging.warning(f"Could not get data for: {entity_id}: {e}")
+        return None
+    except Exception:
+        logging.exception("General error getting entity")
+        return None
+
+
+def add_aleph_entities(G, *entity_ids, publisher=True, mapper=map):
     N = 0
-    for entity_id in entity_ids:
-        entity = alephclient.get_entity(entity_id, publisher=publisher)
-        if entity["id"] not in G:
+    task = partial(_add_entity, publisher=publisher)
+    results = mapper(task, entity_ids)
+    if len(entity_ids) > 10:
+        results = tqdm(results, total=len(entity_ids))
+    for entity in results:
+        if entity is None:
+            continue
+        try:
             proxy = parse_entity(entity)
-            G.add_proxy(proxy)
-            N += 1
+            node, is_new = G.add_proxy(proxy)
+            N += int(is_new)
+        except InvalidData:
+            pass
+    return N
+
+
+def add_aleph_search(G, query, publisher=True, flags=None):
+    N = 0
+    results = alephclient.search(query, publisher=True)
+    for entity in results:
+        if entity is None:
+            continue
+        try:
+            proxy = parse_entity(entity)
+            node, is_new = G.add_proxy(proxy)
+            if flags:
+                node.set_flags(**flags)
+            N += int(is_new)
+        except InvalidData:
+            pass
     return N
 
 
@@ -150,21 +192,21 @@ def add_aleph_collection(G, foreign_key, include=None, schema=None, publisher=Tr
     return N
 
 
-def flag_list(G, list_id, flag):
+def add_list(G, list_id, flag):
     N = 0
     for item in alephclient.entitysetitems(list_id, publisher=True):
         if item["judgement"] != "positive":
             continue
         entity = item["entity"]
         entity["added_by_id"] = item["added_by_id"]
-        if entity["id"] in G:
-            proxy = parse_entity(entity)
-            G.get_node_by_proxy(proxy).set_flags(**{flag: True})
-            N += 1
+        proxy = parse_entity(entity)
+        node, is_new = G.add_proxy(proxy)
+        G.get_node_by_proxy(proxy).set_flags(**{flag: True})
+        N += int(is_new)
     return N
 
 
-def flag_lists(G, foreign_id):
+def add_lists(G, foreign_id):
     collection = alephclient.get_collection_by_foreign_id(foreign_id)
     lists = alephclient.entitysets(collection["id"], set_types=["list"])
     N = 0
@@ -273,13 +315,14 @@ def enrich_similar(G, min_score=120, mapper=map):
             try:
                 node, is_new = G.add_proxy(match_proxy, node_id=node.id)
             except InvalidData:
-                G.add_proxy(match_proxy)
-                link = model.make_entity("UnknownLink")
-                for p in node.parts:
-                    link.add("subject", p)
-                link.add("object", match_proxy.id)
-                link.make_id(*node.parts, match_proxy.id)
-                _, is_new = G.add_proxy(link)
+                pass
+                # G.add_proxy(match_proxy)
+                # link = model.make_entity("UnknownLink")
+                # for p in node.parts:
+                #    link.add("subject", p)
+                # link.add("object", match_proxy.id)
+                # link.make_id(*node.parts, match_proxy.id)
+                # _, is_new = G.add_proxy(link)
             N += int(is_new)
         node.set_flags(aleph_enrich_similar=True)
     return N

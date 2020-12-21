@@ -1,5 +1,7 @@
 import logging
 import json
+import os
+from itertools import groupby
 
 from followthemoney import model
 from followthemoney.exc import InvalidData
@@ -19,16 +21,31 @@ class EntityGraph(object):
     @classmethod
     def from_file(cls, fd):
         G = cls()
-        for line in tqdm(fd):
-            proxy_dict = json.loads(line)
-            node_id = proxy_dict.pop("profile_id", None)
-            node_flags = proxy_dict.pop("flags", {})
-            proxy = model.get_proxy(proxy_dict)
-            try:
-                node, _ = G.add_proxy(proxy, node_id=node_id)
-            except InvalidData:
-                print("!", end="")
-            node.flags = node_flags
+        try:
+            total = os.fstat(fd.fileno()).st_size
+        except AttributeError:
+            total = None
+        with tqdm(total=total, unit="B", unit_scale=True, unit_divisor=1024) as pbar:
+            data = ((json.loads(line), len(line)) for line in fd)
+            data_group = groupby(data, lambda d: d[0].get("profile_id"))
+            for node_id, group in data_group:
+                for proxy_dict, line_length in group:
+                    node_flags = proxy_dict.pop("flags", {})
+                    proxy = model.get_proxy(proxy_dict)
+                    try:
+                        node, is_new = G.add_proxy(proxy, node_id=node_id)
+                    except InvalidData as e:
+                        print(e)
+                        print(proxy.id)
+                        print(proxy.properties)
+                        print(proxy.schema)
+                        print("-------------------------")
+                        print(node_id)
+                        print(G.get_node(node_id).properties)
+                        print(G.get_node(node_id).schema)
+                        print("=========================")
+                    node.flags = node_flags
+                    pbar.update(line_length)
         return G
 
     def to_file(self, fd):
@@ -49,6 +66,7 @@ class EntityGraph(object):
             if proxy.id in self._stub_proxies:
                 cur_node.fill_stub(proxy)
                 self._stub_proxies.discard(proxy.id)
+                self.connect_edges(cur_node)
             if node_id is not None and cur_node.id != node_id:
                 if self._has_node(node_id):
                     node = self.get_node(node_id)
@@ -78,6 +96,15 @@ class EntityGraph(object):
         self._stub_proxies.add(stub.id)
         return node
 
+    def remove_nodes(self, nodes):
+        for node in nodes:
+            self.remove_node(node)
+
+    def remove_node(self, node):
+        for pid in node.parts:
+            self._id_to_canonical.pop(pid, None)
+        self._remove_node(node.id)
+
     def connect_edges(self, node):
         if node.has_edge:
             for edge_prop in node.edges:
@@ -96,13 +123,18 @@ class EntityGraph(object):
         for right_node in right_nodes:
             if left_node == right_node:
                 continue
+            left_node.schema.model.common_schema(left_node.schema, right_node.schema)
             left_node.merge(right_node)
             for pid in right_node.parts:
                 self._id_to_canonical[pid] = left_node.id
             for source_id, target_id, key, data in list(
                 self._get_node_edges(right_node.id)
             ):
-                self._add_edge(source_id, left_node.id, key=key, **data)
+                if source_id == right_node.id:
+                    source_id = left_node.id
+                else:
+                    target_id = left_node.id
+                self._add_edge(source_id, target_id, key=key, **data)
             self._remove_node(right_node.id)
         return left_node
 

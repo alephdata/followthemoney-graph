@@ -1,14 +1,14 @@
-def get_node_label(G, node, maxlen=32):
+def get_node_label(node, maxlen=32):
     try:
         name = node.names[0]
     except IndexError:
-        name = node.schema.name
-    if len(name) > maxlen:
+        name = node.caption
+    if maxlen is not None and len(name) > maxlen:
         name = name[: maxlen - 3] + "..."
     return f"{name}"
 
 
-def get_node_desc(G, node):
+def get_node_desc(node):
     desc = f"{len(node.proxies)} Proxes<br>"
     desc += f"Schema: {node.schema.name}<br>"
     desc += "<br>".join(f"{p}: {values[0]}" for p, values in node.properties.items())
